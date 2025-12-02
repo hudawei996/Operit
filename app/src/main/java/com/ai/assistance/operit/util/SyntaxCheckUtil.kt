@@ -694,20 +694,59 @@ object SyntaxCheckUtil {
      */
     private fun checkHtmlAttributeQuotes(lines: List<String>, errors: MutableList<SyntaxError>) {
         val tagContentPattern = Regex("""<[^>]*>""")
-        val attrPattern = Regex("""\s([\w-]+)=([^"'\s>][^\s>]*)""")
 
         lines.forEachIndexed { lineIndex, line ->
             tagContentPattern.findAll(line).forEach { tagMatch ->
-                attrPattern.findAll(tagMatch.value).forEach { attrMatch ->
-                    val (attrName, attrValue) = attrMatch.destructured
-                    errors.add(
-                        SyntaxError(
-                            lineIndex + 1,
-                            tagMatch.range.first + attrMatch.range.first + 1,
-                            "Attribute '$attrName' value should be quoted",
-                            SyntaxError.Severity.WARNING
-                        )
-                    )
+                val tagContent = tagMatch.value
+                var i = 0
+                
+                while (i < tagContent.length) {
+                    // 跳过空白
+                    while (i < tagContent.length && tagContent[i].isWhitespace()) i++
+                    if (i >= tagContent.length) break
+                    
+                    // 查找属性名
+                    val attrNameStart = i
+                    while (i < tagContent.length && (tagContent[i].isLetterOrDigit() || tagContent[i] in setOf('-', '_', ':'))) i++
+                    if (i >= tagContent.length || tagContent[i] != '=') {
+                        // 不是 key=value 形式，继续
+                        i++
+                        continue
+                    }
+                    
+                    val attrName = tagContent.substring(attrNameStart, i)
+                    i++ // 跳过 '='
+                    
+                    // 检查属性值是否有引号
+                    if (i < tagContent.length) {
+                        val quoteChar = tagContent[i]
+                        if (quoteChar == '"' || quoteChar == '\'') {
+                            // 有引号，跳过整个引号内的内容
+                            i++ // 跳过开始引号
+                            while (i < tagContent.length && tagContent[i] != quoteChar) {
+                                if (tagContent[i] == '\\' && i + 1 < tagContent.length) {
+                                    i += 2 // 跳过转义字符
+                                } else {
+                                    i++
+                                }
+                            }
+                            if (i < tagContent.length) i++ // 跳过结束引号
+                        } else {
+                            // 无引号的属性值，报告警告
+                            val valueStart = i
+                            while (i < tagContent.length && !tagContent[i].isWhitespace() && tagContent[i] != '>') i++
+                            val attrValue = tagContent.substring(valueStart, i)
+                            
+                            errors.add(
+                                SyntaxError(
+                                    lineIndex + 1,
+                                    tagMatch.range.first + valueStart + 1,
+                                    "Attribute '$attrName' value should be quoted",
+                                    SyntaxError.Severity.WARNING
+                                )
+                            )
+                        }
+                    }
                 }
             }
         }

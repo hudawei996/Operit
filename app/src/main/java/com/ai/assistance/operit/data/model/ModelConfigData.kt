@@ -98,7 +98,10 @@ data class ModelConfigData(
         val enableDirectImageProcessing: Boolean = false, // 是否启用直接图片处理
 
         // Gemini特定配置
-        val enableGoogleSearch: Boolean = false // 是否启用Google Search Grounding (仅Gemini支持)
+        val enableGoogleSearch: Boolean = false, // 是否启用Google Search Grounding (仅Gemini支持)
+
+        // Tool Call配置
+        val enableToolCall: Boolean = false // 是否启用Tool Call接口调用工具（使用模型原生工具调用而非XML格式）
 )
 
 /** 简化版的模型配置数据，用于列表显示 */

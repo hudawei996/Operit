@@ -113,6 +113,9 @@ fun ModelApiSettingsSection(
     
     // Google Search Grounding 配置状态 (仅Gemini)
     var enableGoogleSearchInput by remember(config.id) { mutableStateOf(config.enableGoogleSearch) }
+    
+    // Tool Call配置状态
+    var enableToolCallInput by remember(config.id) { mutableStateOf(config.enableToolCall) }
 
     // 保存设置的通用函数
     val saveSettings = {
@@ -146,6 +149,12 @@ fun ModelApiSettingsSection(
             configManager.updateGoogleSearch(
                     configId = config.id,
                     enableGoogleSearch = enableGoogleSearchInput
+            )
+            
+            // 更新 Tool Call 配置
+            configManager.updateToolCall(
+                    configId = config.id,
+                    enableToolCall = enableToolCallInput
             )
 
             // 刷新所有AI服务实例，确保使用最新配置
@@ -496,6 +505,16 @@ fun ModelApiSettingsSection(
                         subtitle = stringResource(R.string.enable_google_search_desc),
                             checked = enableGoogleSearchInput,
                             onCheckedChange = { enableGoogleSearchInput = it }
+                    )
+            }
+            
+            // Tool Call 开关 (非MNN模型)
+            if (selectedApiProvider != ApiProviderType.MNN) {
+                SettingsSwitchRow(
+                        title = stringResource(R.string.enable_tool_call),
+                        subtitle = stringResource(R.string.enable_tool_call_desc),
+                            checked = enableToolCallInput,
+                            onCheckedChange = { enableToolCallInput = it }
                     )
             }
 

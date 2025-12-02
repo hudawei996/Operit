@@ -11,6 +11,8 @@ import com.ai.assistance.operit.core.tools.mcp.MCPManager
 import com.ai.assistance.operit.core.tools.mcp.MCPPackage
 import com.ai.assistance.operit.core.tools.mcp.MCPServerConfig
 import com.ai.assistance.operit.core.tools.mcp.MCPToolExecutor
+import com.ai.assistance.operit.data.model.PackageToolPromptCategory
+import com.ai.assistance.operit.data.model.ToolPrompt
 import com.ai.assistance.operit.data.model.ToolResult
 import java.io.File
 import kotlinx.serialization.encodeToString
@@ -757,6 +759,53 @@ private constructor(private val context: Context, private val aiToolHandler: AIT
         }
 
         return null
+    }
+
+    /**
+     * 将 ToolPackage 转换为 PackageToolPromptCategory
+     * 用于生成结构化的包工具提示词
+     * 
+     * @param toolPackage 要转换的工具包
+     * @return PackageToolPromptCategory 对象
+     */
+    fun toPromptCategory(toolPackage: ToolPackage): PackageToolPromptCategory {
+        val toolPrompts = toolPackage.tools.map { packageTool ->
+            // 将 PackageTool 转换为 ToolPrompt
+            val parametersString = if (packageTool.parameters.isNotEmpty()) {
+                packageTool.parameters.joinToString(", ") { param ->
+                    val required = if (param.required) "required" else "optional"
+                    "${param.name} (${param.type}, $required)"
+                }
+            } else {
+                ""
+            }
+            
+            ToolPrompt(
+                name = packageTool.name,
+                description = packageTool.description,
+                parameters = parametersString
+            )
+        }
+        
+        return PackageToolPromptCategory(
+            packageName = toolPackage.name,
+            packageDescription = toolPackage.description,
+            tools = toolPrompts
+        )
+    }
+    
+    /**
+     * 获取所有已导入包的提示词分类列表
+     * 
+     * @return 已导入包的 PackageToolPromptCategory 列表
+     */
+    fun getImportedPackagesPromptCategories(): List<PackageToolPromptCategory> {
+        val importedPackageNames = getImportedPackages()
+        return importedPackageNames.mapNotNull { packageName ->
+            getPackageTools(packageName)?.let { toolPackage ->
+                toPromptCategory(toolPackage)
+            }
+        }
     }
 
     /** Clean up resources when the manager is no longer needed */

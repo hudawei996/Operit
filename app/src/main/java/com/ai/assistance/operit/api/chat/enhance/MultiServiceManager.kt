@@ -157,6 +157,16 @@ class MultiServiceManager(private val context: Context) {
     }
 
     /**
+     * 获取指定功能类型的模型配置
+     * @param functionType 功能类型
+     * @return 模型配置数据
+     */
+    suspend fun getModelConfigForFunction(functionType: FunctionType): ModelConfigData {
+        val configMapping = functionalConfigManager.getConfigMappingForFunction(functionType)
+        return modelConfigManager.getModelConfigFlow(configMapping.configId).first()
+    }
+
+    /**
      * 检查识图功能是否已配置
      * @return 如果识图功能配置启用了直接图片处理则返回true
      */

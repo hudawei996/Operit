@@ -4,6 +4,7 @@ import android.util.Log
 import com.ai.assistance.operit.data.model.ApiProviderType
 import com.ai.assistance.operit.data.model.ModelOption
 import com.ai.assistance.operit.data.model.ModelParameter
+import com.ai.assistance.operit.data.model.ToolPrompt
 import com.ai.assistance.operit.util.ChatUtils
 import com.ai.assistance.operit.util.TokenCacheManager
 import com.ai.assistance.operit.util.exceptions.UserCancellationException
@@ -29,7 +30,8 @@ open class OpenAIProvider(
     private val client: OkHttpClient,
     private val customHeaders: Map<String, String> = emptyMap(),
     private val providerType: ApiProviderType = ApiProviderType.OPENAI,
-    protected val supportsVision: Boolean = false // 是否支持图片处理
+    protected val supportsVision: Boolean = false, // 是否支持图片处理
+    private val enableToolCall: Boolean = false // 是否启用Tool Call接口
 ) : AIService {
     // private val client: OkHttpClient = HttpClientFactory.instance
 
@@ -143,9 +145,10 @@ open class OpenAIProvider(
             chatHistory: List<Pair<String, String>>,
             modelParameters: List<ModelParameter<*>> = emptyList(),
             enableThinking: Boolean = false,
-            stream: Boolean = true
+            stream: Boolean = true,
+            availableTools: List<ToolPrompt>? = null
     ): RequestBody {
-        val jsonString = createRequestBodyInternal(message, chatHistory, modelParameters, stream)
+        val jsonString = createRequestBodyInternal(message, chatHistory, modelParameters, stream, availableTools)
         return jsonString.toRequestBody(JSON)
     }
 
@@ -156,7 +159,8 @@ open class OpenAIProvider(
         message: String,
         chatHistory: List<Pair<String, String>>,
         modelParameters: List<ModelParameter<*>> = emptyList(),
-        stream: Boolean = true
+        stream: Boolean = true,
+        availableTools: List<ToolPrompt>? = null
     ): String {
         val jsonObject = JSONObject()
         jsonObject.put("model", modelName)
@@ -195,6 +199,16 @@ open class OpenAIProvider(
                     }
                 }
                 Log.d("AIService", "添加参数 ${param.apiName} = ${param.currentValue}")
+            }
+        }
+        
+        // 如果启用Tool Call且传入了工具列表，添加tools定义
+        if (enableToolCall && availableTools != null) {
+            val tools = buildToolDefinitions(availableTools)
+            if (tools.length() > 0) {
+                jsonObject.put("tools", tools)
+                jsonObject.put("tool_choice", "auto") // 让模型自动决定是否使用工具
+                Log.d("AIService", "Tool Call已启用，添加了 ${tools.length()} 个工具定义")
             }
         }
         
@@ -270,9 +284,22 @@ open class OpenAIProvider(
         // 使用TokenCacheManager计算token数量
         val tokenCount = tokenCacheManager.calculateInputTokens(message, chatHistory)
 
-        // 添加聊天历史
-        if (chatHistory.isNotEmpty()) {
-            val standardizedHistory = ChatUtils.mapChatHistoryToStandardRoles(chatHistory)
+        // 检查当前消息是否已经在历史记录的末尾（避免重复）
+        val isMessageInHistory = chatHistory.isNotEmpty() && chatHistory.last().second == message
+        
+        // 如果消息已在历史中，只处理历史；否则需要处理历史+当前消息
+        val effectiveHistory = if (isMessageInHistory) {
+            chatHistory
+        } else {
+            chatHistory + ("user" to message)
+        }
+
+        // 追踪上一个assistant消息中的tool_call_ids，用于匹配tool结果
+        val lastToolCallIds = mutableListOf<String>()
+
+        // 添加聊天历史（包含当前消息如果它不在历史中）
+        if (effectiveHistory.isNotEmpty()) {
+            val standardizedHistory = ChatUtils.mapChatHistoryToStandardRoles(effectiveHistory)
             val mergedHistory = mutableListOf<Pair<String, String>>()
 
             for ((role, content) in standardizedHistory) {
@@ -288,38 +315,80 @@ open class OpenAIProvider(
                     mergedHistory.add(Pair(role, content))
                 }
             }
-
+            
             for ((role, content) in mergedHistory) {
-                val historyMessage = JSONObject()
-                historyMessage.put("role", role)
-                historyMessage.put("content", buildContentField(content))
-                messagesArray.put(historyMessage)
-            }
-        }
-
-        // 添加当前消息
-        val lastMessageRole =
-                if (messagesArray.length() > 0) {
-                    messagesArray.getJSONObject(messagesArray.length() - 1).getString("role")
-                } else null
-
-        if (lastMessageRole != "user") {
-            val messageObject = JSONObject()
-            messageObject.put("role", "user")
-            messageObject.put("content", buildContentField(message))
-            messagesArray.put(messageObject)
-        } else {
-            // 如果消息为空，不触发拼接
-            if (message.isNotBlank()) {
-                val lastMessage = messagesArray.getJSONObject(messagesArray.length() - 1)
-                val lastContent = lastMessage.get("content")
-                val lastText = if (lastContent is String) lastContent else ""
-                if (lastText != message) {
-                    val combinedContent = lastText + "\n" + message
-                    lastMessage.put("content", buildContentField(combinedContent))
+                // 当启用Tool Call API时，转换XML格式的工具调用
+                if (enableToolCall) {
+                    if (role == "assistant") {
+                        // 解析assistant消息中的XML tool calls
+                        val (textContent, toolCalls) = parseXmlToolCalls(content)
+                        val historyMessage = JSONObject()
+                        historyMessage.put("role", role)
+                        if (textContent.isNotEmpty()) {
+                            historyMessage.put("content", buildContentField(textContent))
+                        } else {
+                            historyMessage.put("content", null)
+                        }
+                        if (toolCalls != null && toolCalls.length() > 0) {
+                            historyMessage.put("tool_calls", toolCalls)
+                            // 记录这些tool_call_ids供后续tool消息使用
+                            lastToolCallIds.clear()
+                            for (i in 0 until toolCalls.length()) {
+                                lastToolCallIds.add(toolCalls.getJSONObject(i).getString("id"))
+                            }
+                        }
+                        messagesArray.put(historyMessage)
+                    } else if (role == "user") {
+                        // 解析user消息中的XML tool_result
+                        val (textContent, toolResults) = parseXmlToolResults(content)
+                        
+                        // 如果有tool results，需要添加为tool角色的消息
+                        if (toolResults != null && toolResults.isNotEmpty()) {
+                            toolResults.forEachIndexed { index, (_, resultContent) ->
+                                val toolMessage = JSONObject()
+                                toolMessage.put("role", "tool")
+                                // 使用之前记录的tool_call_id，如果没有就生成一个
+                                val toolCallId = if (index < lastToolCallIds.size) {
+                                    lastToolCallIds[index]
+                                } else {
+                                    "call_unknown_$index"
+                                }
+                                toolMessage.put("tool_call_id", toolCallId)
+                                toolMessage.put("content", resultContent)
+                                messagesArray.put(toolMessage)
+                                Log.d("AIService", "历史XML→ToolResult: ID=$toolCallId, content length=${resultContent.length}")
+                            }
+                            // 使用后清空
+                            lastToolCallIds.clear()
+                        }
+                        
+                        // 如果还有其他文本内容，添加为user消息
+                        if (textContent.isNotEmpty()) {
+                            val historyMessage = JSONObject()
+                            historyMessage.put("role", role)
+                            historyMessage.put("content", buildContentField(textContent))
+                            messagesArray.put(historyMessage)
+                            Log.d("AIService", "历史user消息有剩余文本: length=${textContent.length}, preview=${textContent.take(100)}")
+                        } else {
+                            Log.d("AIService", "历史user消息全是tool_result，无剩余文本")
+                        }
+                    } else {
+                        // system等其他角色正常处理
+                        val historyMessage = JSONObject()
+                        historyMessage.put("role", role)
+                        historyMessage.put("content", buildContentField(content))
+                        messagesArray.put(historyMessage)
+                    }
+                } else {
+                    // 不启用Tool Call API时，保持原样
+                    val historyMessage = JSONObject()
+                    historyMessage.put("role", role)
+                    historyMessage.put("content", buildContentField(content))
+                    messagesArray.put(historyMessage)
                 }
             }
         }
+
         return Pair(messagesArray, tokenCount)
     }
 
@@ -329,6 +398,562 @@ open class OpenAIProvider(
     ): Int {
         // 使用TokenCacheManager计算token数量
         return tokenCacheManager.calculateInputTokens(message, chatHistory)
+    }
+
+    // ==================== Tool Call 支持 ====================
+    
+    /**
+     * 从ToolPrompt列表构建Tool Call的JSON Schema定义
+     */
+    private fun buildToolDefinitions(toolPrompts: List<ToolPrompt>): JSONArray {
+        val tools = JSONArray()
+        
+        for (tool in toolPrompts) {
+            tools.put(JSONObject().apply {
+                put("type", "function")
+                put("function", JSONObject().apply {
+                    put("name", tool.name)
+                    // 组合description和details作为完整描述
+                    val fullDescription = if (tool.details.isNotEmpty()) {
+                        "${tool.description}\n${tool.details}"
+                    } else {
+                        tool.description
+                    }
+                    put("description", fullDescription)
+                    
+                    // 只使用结构化参数
+                    val parametersSchema = buildSchemaFromStructured(tool.parametersStructured ?: emptyList())
+                    put("parameters", parametersSchema)
+                })
+            })
+        }
+        
+        return tools
+    }
+    
+    /**
+     * 从结构化参数构建JSON Schema
+     */
+    private fun buildSchemaFromStructured(params: List<com.ai.assistance.operit.data.model.ToolParameterSchema>): JSONObject {
+        val schema = JSONObject().apply {
+            put("type", "object")
+        }
+        
+        val properties = JSONObject()
+        val required = JSONArray()
+        
+        for (param in params) {
+            properties.put(param.name, JSONObject().apply {
+                put("type", param.type)
+                put("description", param.description)
+                if (param.default != null) {
+                    put("default", param.default)
+                }
+            })
+            
+            if (param.required) {
+                required.put(param.name)
+            }
+        }
+        
+        schema.put("properties", properties)
+        if (required.length() > 0) {
+            schema.put("required", required)
+        }
+        
+        return schema
+    }
+    
+    /**
+     * 解析ToolPrompt的parameters字符串为JSON Schema格式
+     * 例如: "path (file path), recursive (boolean, default false)" 
+     * 转换为 OpenAI JSON Schema
+     */
+    private fun parseParametersToSchema(parametersString: String): JSONObject {
+        val schema = JSONObject().apply {
+            put("type", "object")
+        }
+        
+        if (parametersString.isEmpty()) {
+            schema.put("properties", JSONObject())
+            return schema
+        }
+        
+        val properties = JSONObject()
+        val required = JSONArray()
+        
+        // 按逗号分割参数
+        val params = parametersString.split(",").map { it.trim() }
+        
+        for (param in params) {
+            if (param.isEmpty()) continue
+            
+            // 提取参数名和描述 "param_name (description)"
+            val nameMatch = Regex("^([\\w_]+)\\s*\\((.+)\\)$").find(param)
+            if (nameMatch != null) {
+                val paramName = nameMatch.groupValues[1]
+                val paramDesc = nameMatch.groupValues[2].trim()
+                
+                // 判断类型和是否可选
+                val isOptional = paramDesc.contains("optional", ignoreCase = true) || 
+                                 paramDesc.contains("default", ignoreCase = true)
+                val paramType = when {
+                    paramDesc.contains("boolean", ignoreCase = true) -> "boolean"
+                    paramDesc.contains("number", ignoreCase = true) || 
+                    paramDesc.contains("integer", ignoreCase = true) -> "integer"
+                    else -> "string"
+                }
+                
+                properties.put(paramName, JSONObject().apply {
+                    put("type", paramType)
+                    put("description", paramDesc)
+                })
+                
+                if (!isOptional) {
+                    required.put(paramName)
+                }
+            }
+        }
+        
+        schema.put("properties", properties)
+        if (required.length() > 0) {
+            schema.put("required", required)
+        }
+        
+        return schema
+    }
+    
+    /**
+     * 将API返回的tool_calls转换为XML格式
+     * 这样上层代码无需修改，继续使用XML解析逻辑
+     * @param toolCalls tool_calls JSON数组
+     * @param isStreaming 是否为流式响应（流式响应中tool_calls是增量的）
+     */
+    private fun convertToolCallsToXml(toolCalls: JSONArray, isStreaming: Boolean = false): String {
+        val xml = StringBuilder()
+        
+        for (i in 0 until toolCalls.length()) {
+            val toolCall = toolCalls.getJSONObject(i)
+            val function = toolCall.optJSONObject("function") ?: continue
+            
+            // 流式响应中，name和arguments可能不在同一个delta中
+            val name = function.optString("name", "")
+            if (name.isEmpty()) {
+                // 如果没有name，说明这是增量更新，跳过
+                continue
+            }
+            
+            val argumentsJson = function.optString("arguments", "")
+            
+            // 解析参数JSON
+            val params = if (argumentsJson.isNotEmpty()) {
+                try {
+                    JSONObject(argumentsJson)
+                } catch (e: Exception) {
+                    Log.w("OpenAIProvider", "Failed to parse tool arguments: $argumentsJson", e)
+                    JSONObject()
+                }
+            } else {
+                JSONObject()
+            }
+            
+            // 构建XML格式
+            xml.append("<tool name=\"$name\">")
+            
+            // 添加所有参数
+            val keys = params.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val value = params.get(key)
+                // 必须对值进行XML转义，否则会破坏XML结构
+                val escapedValue = escapeXml(value.toString())
+                xml.append("\n<param name=\"$key\">$escapedValue</param>")
+            }
+            
+            xml.append("\n</tool>\n")
+        }
+        
+        return xml.toString()
+    }
+
+    /**
+     * XML转义/反转义工具
+     */
+    private object XmlEscaper {
+        fun escape(text: String): String {
+            return text.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .replace("\"", "&quot;")
+                    .replace("'", "&apos;")
+        }
+        
+        fun unescape(text: String): String {
+            return text.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&amp;", "&")
+        }
+    }
+    
+    // 向后兼容的快捷方法
+    private fun escapeXml(text: String) = XmlEscaper.escape(text)
+    
+    /**
+     * 字符串非空且非"null"检查
+     */
+    private fun String.isNotNullOrEmpty() = this.isNotEmpty() && this != "null"
+    
+    /**
+     * 增量式 JSON 解析器，用于流式处理 Tool Call 参数
+     * 能够接受 JSON 片段流，并产生参数解析事件
+     */
+    private class StreamingJsonParser {
+        private enum class State {
+            WAIT_BRACE,      // 等待起始 {
+            WAIT_KEY_QUOTE,  // 等待 Key 的起始 "
+            READ_KEY,        // 读取 Key 内容
+            WAIT_COLON,      // 等待 :
+            WAIT_VALUE,      // 等待 Value
+            READ_STRING,     // 读取 String Value
+            READ_PRIMITIVE,  // 读取 Primitive Value
+            ESCAPE,          // 转义字符处理
+            UNICODE_ESCAPE,  // Unicode 转义
+            WAIT_COMMA       // 等待 , 或 }
+        }
+
+        private var state = State.WAIT_BRACE
+        private val buffer = StringBuilder()
+        private var unicodeCount = 0
+        
+        sealed class Event {
+            data class ParamStart(val name: String) : Event()
+            data class ParamValue(val text: String) : Event()
+            object ParamEnd : Event()
+        }
+
+        fun feed(chunk: String): List<Event> {
+            val events = mutableListOf<Event>()
+            
+            for (c in chunk) {
+                when (state) {
+                    State.WAIT_BRACE -> if (c == '{') state = State.WAIT_KEY_QUOTE
+                    State.WAIT_KEY_QUOTE -> {
+                        if (c == '"') {
+                            state = State.READ_KEY
+                            buffer.setLength(0)
+                        } else if (c == '}') {
+                            // 对象结束
+                        }
+                    }
+                    State.READ_KEY -> {
+                        if (c == '"') {
+                            events.add(Event.ParamStart(buffer.toString()))
+                            state = State.WAIT_COLON
+                        } else {
+                            if (c != '\\') buffer.append(c)
+                        }
+                    }
+                    State.WAIT_COLON -> if (c == ':') state = State.WAIT_VALUE
+                    State.WAIT_VALUE -> {
+                        if (!c.isWhitespace()) {
+                            if (c == '"') {
+                                state = State.READ_STRING
+                            } else {
+                                state = State.READ_PRIMITIVE
+                                buffer.setLength(0)
+                                buffer.append(c)
+                            }
+                        }
+                    }
+                    State.READ_STRING -> {
+                        if (c == '"') {
+                            state = State.WAIT_COMMA
+                            events.add(Event.ParamEnd)
+                        } else if (c == '\\') {
+                            state = State.ESCAPE
+                        } else {
+                            events.add(Event.ParamValue(c.toString()))
+                        }
+                    }
+                    State.ESCAPE -> {
+                        if (c == 'u') {
+                            state = State.UNICODE_ESCAPE
+                            unicodeCount = 0
+                            buffer.setLength(0)
+                        } else {
+                            val unescaped = when (c) {
+                                'n' -> "\n"
+                                'r' -> "\r"
+                                't' -> "\t"
+                                'b' -> "\b"
+                                'f' -> "\u000c"
+                                '\"' -> "\""
+                                '\\' -> "\\"
+                                '/' -> "/"
+                                else -> c.toString()
+                            }
+                            events.add(Event.ParamValue(unescaped))
+                            state = State.READ_STRING
+                        }
+                    }
+                    State.UNICODE_ESCAPE -> {
+                        buffer.append(c)
+                        unicodeCount++
+                        if (unicodeCount == 4) {
+                            try {
+                                val code = buffer.toString().toInt(16)
+                                events.add(Event.ParamValue(code.toChar().toString()))
+                            } catch (_: Exception) { }
+                            state = State.READ_STRING
+                        }
+                    }
+                    State.READ_PRIMITIVE -> {
+                        if (c == ',' || c == '}' || c.isWhitespace()) {
+                            events.add(Event.ParamValue(buffer.toString()))
+                            events.add(Event.ParamEnd)
+                            if (c == ',') state = State.WAIT_KEY_QUOTE
+                            else if (c == '}') state = State.WAIT_BRACE
+                            else state = State.WAIT_COMMA
+                        } else {
+                            buffer.append(c)
+                        }
+                    }
+                    State.WAIT_COMMA -> {
+                        if (c == ',') state = State.WAIT_KEY_QUOTE
+                        else if (c == '}') state = State.WAIT_BRACE
+                    }
+                }
+            }
+            return events
+        }
+        
+        fun flush(): List<Event> {
+            val events = mutableListOf<Event>()
+            if (state == State.READ_PRIMITIVE && buffer.isNotEmpty()) {
+                events.add(Event.ParamValue(buffer.toString()))
+                events.add(Event.ParamEnd)
+            }
+            return events
+        }
+    }
+    
+    /**
+     * Tool Call流式输出状态管理
+     */
+    private data class ToolCallState(
+        val emitted: MutableMap<Int, Boolean> = mutableMapOf(),
+        val nameEmitted: MutableMap<Int, Boolean> = mutableMapOf(),
+        val parser: MutableMap<Int, StreamingJsonParser> = mutableMapOf()
+    ) {
+        fun getParser(index: Int) = parser.getOrPut(index) { StreamingJsonParser() }
+        
+        fun clear() {
+            emitted.clear()
+            nameEmitted.clear()
+            parser.clear()
+        }
+    }
+    
+    /**
+     * 流式内容发送辅助类
+     */
+    private inner class StreamEmitter(
+        private val receivedContent: StringBuilder,
+        private val emit: suspend (String) -> Unit,
+        private val onTokensUpdated: suspend (Int, Int, Int) -> Unit
+    ) {
+        suspend fun emitContent(content: String) {
+            if (content.isNotNullOrEmpty()) {
+                emit(content)
+                receivedContent.append(content)
+                tokenCacheManager.addOutputTokens(ChatUtils.estimateTokenCount(content))
+                onTokensUpdated(
+                    tokenCacheManager.totalInputTokenCount,
+                    tokenCacheManager.cachedInputTokenCount,
+                    tokenCacheManager.outputTokenCount
+                )
+            }
+        }
+        
+        suspend fun emitThinkContent(thinkContent: String, tag: String = "think") {
+            if (thinkContent.isNotNullOrEmpty()) {
+                val wrapped = "<$tag>$thinkContent</$tag>"
+                emit(wrapped)
+                receivedContent.append(wrapped)
+                tokenCacheManager.addOutputTokens(ChatUtils.estimateTokenCount(thinkContent))
+                onTokensUpdated(
+                    tokenCacheManager.totalInputTokenCount,
+                    tokenCacheManager.cachedInputTokenCount,
+                    tokenCacheManager.outputTokenCount
+                )
+            }
+        }
+        
+        suspend fun emitTag(tag: String) {
+            emit(tag)
+            receivedContent.append(tag)
+        }
+        
+        /**
+         * 处理 StreamingJsonParser 事件，转换为 XML 输出
+         */
+        suspend fun handleJsonEvents(events: List<StreamingJsonParser.Event>) {
+            events.forEach { event ->
+                when (event) {
+                    is StreamingJsonParser.Event.ParamStart -> emitTag("\n  <param name=\"${event.name}\">")
+                    is StreamingJsonParser.Event.ParamValue -> emitContent(escapeXml(event.text))
+                    is StreamingJsonParser.Event.ParamEnd -> emitTag("</param>")
+                }
+            }
+        }
+    }
+    
+    /**
+     * 创建 Tool Call 累积对象
+     */
+    private fun createToolCallAccumulator(index: Int): JSONObject {
+        return JSONObject().apply {
+            put("index", index)
+            put("id", "")
+            put("type", "function")
+            put("function", JSONObject().apply {
+                put("name", "")
+                put("arguments", "")
+            })
+        }
+    }
+    
+    /**
+     * 检查是否已被取消，如果是则抛出异常
+     */
+    private fun checkCancellation(exception: Exception? = null) {
+        if (isManuallyCancelled) {
+            Log.d("AIService", "请求被用户取消，停止重试。")
+            throw UserCancellationException("请求已被用户取消", exception)
+        }
+    }
+    
+    /**
+     * 处理可重试错误的统一逻辑
+     */
+    private suspend fun handleRetryableError(
+        exception: Exception,
+        retryCount: Int,
+        maxRetries: Int,
+        errorType: String,
+        errorMessage: String,
+        onNonFatalError: suspend (String) -> Unit
+    ): Int {
+        checkCancellation(exception)
+        
+        val newRetryCount = retryCount + 1
+        if (newRetryCount >= maxRetries) {
+            Log.e("AIService", "【发送消息】$errorType 且达到最大重试次数", exception)
+            throw IOException(errorMessage)
+        }
+        
+        Log.w("AIService", "【发送消息】$errorType，正在进行第 $newRetryCount 次重试...", exception)
+        onNonFatalError("【$errorType，正在进行第 $newRetryCount 次重试...】")
+        delay(1000L * (1 shl (newRetryCount - 1)))
+        
+        return newRetryCount
+    }
+
+    
+    /**
+     * 解析XML格式的tool调用，转换为OpenAI Tool Call格式
+     * @return Pair<文本内容, tool_calls数组>
+     */
+    private fun parseXmlToolCalls(content: String): Pair<String, JSONArray?> {
+        val toolPattern = Regex("<tool\\s+name=\"([^\"]+)\">([\\s\\S]*?)</tool>", RegexOption.MULTILINE)
+        val matches = toolPattern.findAll(content)
+        
+        if (!matches.any()) {
+            return Pair(content, null)
+        }
+        
+        val toolCalls = JSONArray()
+        var textContent = content
+        var callIndex = 0
+        
+        matches.forEach { match ->
+            val toolName = match.groupValues[1]
+            val toolBody = match.groupValues[2]
+            
+            // 解析参数
+            val paramPattern = Regex("<param\\s+name=\"([^\"]+)\">([\\s\\S]*?)</param>")
+            val params = JSONObject()
+            
+            paramPattern.findAll(toolBody).forEach { paramMatch ->
+                val paramName = paramMatch.groupValues[1]
+                val paramValue = XmlEscaper.unescape(paramMatch.groupValues[2].trim())
+                params.put(paramName, paramValue)
+            }
+            
+            // 构建tool_call对象
+            // 使用工具名和参数的哈希生成确定性ID
+            val callId = "call_${toolName}_${params.toString().hashCode().toString(16)}_$callIndex"
+            toolCalls.put(JSONObject().apply {
+                put("id", callId)
+                put("type", "function")
+                put("function", JSONObject().apply {
+                    put("name", toolName)
+                    put("arguments", params.toString())
+                })
+            })
+            
+            callIndex++
+            Log.d("AIService", "XML→ToolCall: $toolName -> ID: $callId")
+            
+            // 从文本内容中移除tool标签
+            textContent = textContent.replace(match.value, "")
+        }
+        
+        return Pair(textContent.trim(), toolCalls)
+    }
+    
+    /**
+     * 解析XML格式的tool_result，转换为OpenAI Tool消息格式
+     * @return List<Pair<tool_call_id, result_content>>
+     */
+    private fun parseXmlToolResults(content: String): Pair<String, List<Pair<String, String>>?> {
+        // 匹配带属性的tool_result标签，例如: <tool_result name="..." status="...">...</tool_result>
+        val resultPattern = Regex("<tool_result[^>]*>([\\s\\S]*?)</tool_result>", RegexOption.MULTILINE)
+        val matches = resultPattern.findAll(content)
+        
+        if (!matches.any()) {
+            return Pair(content, null)
+        }
+        
+        val results = mutableListOf<Pair<String, String>>()
+        var textContent = content
+        var resultIndex = 0
+        
+        matches.forEach { match ->
+            // 提取<content>标签内的内容，如果有的话
+            val fullContent = match.groupValues[1].trim()
+            val contentPattern = Regex("<content>([\\s\\S]*?)</content>", RegexOption.MULTILINE)
+            val contentMatch = contentPattern.find(fullContent)
+            val resultContent = if (contentMatch != null) {
+                contentMatch.groupValues[1].trim()
+            } else {
+                fullContent
+            }
+            
+            // 生成一个tool_call_id（这里需要与之前的call对应，但因为历史记录可能不完整，我们使用索引）
+            results.add(Pair("call_result_${resultIndex}", resultContent))
+            
+            // 从文本内容中移除tool_result标签（包括前后的空白符）
+            textContent = textContent.replace(match.value, "").trim()
+            
+            Log.d("AIService", "解析tool_result #$resultIndex, content length=${resultContent.length}")
+            resultIndex++
+        }
+        
+        // trim 确保移除所有空白字符
+        return Pair(textContent.trim(), results)
     }
 
     // 创建请求
@@ -355,6 +980,7 @@ open class OpenAIProvider(
             modelParameters: List<ModelParameter<*>>,
             enableThinking: Boolean,
             stream: Boolean,
+            availableTools: List<ToolPrompt>?,
             onTokensUpdated: suspend (input: Int, cachedInput: Int, output: Int) -> Unit,
             onNonFatalError: suspend (error: String) -> Unit
     ): Stream<String> = stream {
@@ -403,7 +1029,7 @@ open class OpenAIProvider(
                         "AIService",
                         "【发送消息】准备构建请求体，模型参数数量: ${modelParameters.size}，已启用参数: ${modelParameters.count { it.isEnabled }}"
                 )
-                val requestBody = createRequestBody(currentMessage, standardizedHistory, modelParameters, enableThinking, stream)
+                val requestBody = createRequestBody(currentMessage, standardizedHistory, modelParameters, enableThinking, stream, availableTools)
                 onTokensUpdated(tokenCacheManager.totalInputTokenCount, tokenCacheManager.cachedInputTokenCount, tokenCacheManager.outputTokenCount)
                 val request = createRequest(requestBody)
                 Log.d("AIService", "【发送消息】请求体构建完成，目标模型: $modelName，API端点: $apiEndpoint")
@@ -450,6 +1076,13 @@ open class OpenAIProvider(
                         // 跟踪思考内容的状态
                         var isInReasoningMode = false
                         var hasEmittedThinkStart = false
+                        
+                        // 累积流式Tool Call数据（按index存储）
+                        val accumulatedToolCalls = mutableMapOf<Int, JSONObject>()
+                        // 追踪每个tool call的流式输出状态
+                        val toolCallState = ToolCallState()
+                        // 流式内容发送器
+                        val emitter = StreamEmitter(receivedContent, ::emit, onTokensUpdated)
 
                         try {
                             reader.useLines { lines ->
@@ -485,6 +1118,84 @@ open class OpenAIProvider(
                                                     // 处理delta格式（流式响应）
                                                     val delta = choice.optJSONObject("delta")
                                                     if (delta != null) {
+                                                        // 累积流式Tool Call数据并流式输出
+                                                        val toolCallsDeltas = delta.optJSONArray("tool_calls")
+                                                        if (toolCallsDeltas != null && toolCallsDeltas.length() > 0 && enableToolCall) {
+                                                            for (i in 0 until toolCallsDeltas.length()) {
+                                                                val deltaCall = toolCallsDeltas.getJSONObject(i)
+                                                                val index = deltaCall.optInt("index", -1)
+                                                                if (index < 0) continue
+                                                                
+                                                                // 获取或创建该index的累积对象
+                                                                val accumulated = accumulatedToolCalls.getOrPut(index) {
+                                                                    createToolCallAccumulator(index)
+                                                                }
+                                                                
+                                                                // 更新id和type
+                                                                deltaCall.optString("id", "").let { if (it.isNotEmpty()) accumulated.put("id", it) }
+                                                                deltaCall.optString("type", "").let { if (it.isNotEmpty()) accumulated.put("type", it) }
+                                                                
+                                                                // 累积function字段
+                                                                val deltaFunction = deltaCall.optJSONObject("function")
+                                                                if (deltaFunction != null) {
+                                                                    val accFunction = accumulated.getJSONObject("function")
+                                                                    val name = deltaFunction.optString("name", "")
+                                                                    if (name.isNotEmpty()) {
+                                                                        accFunction.put("name", name)
+                                                                        
+                                                                        // 【流式输出】当收到工具名时，立即输出开始标签
+                                                                        if (toolCallState.nameEmitted[index] != true) {
+                                                                            val toolStartTag = if (toolCallState.emitted[index] != true) {
+                                                                                toolCallState.emitted[index] = true
+                                                                                "\n<tool name=\"$name\">"
+                                                                            } else {
+                                                                                ""
+                                                                            }
+                                                                            if (toolStartTag.isNotEmpty()) {
+                                                                                emitter.emitTag(toolStartTag)
+                                                                            }
+                                                                            toolCallState.nameEmitted[index] = true
+                                                                        }
+                                                                    }
+                                                                    val args = deltaFunction.optString("arguments", "")
+                                                                    if (args.isNotEmpty()) {
+                                                                        val currentArgs = accFunction.optString("arguments", "")
+                                                                        accFunction.put("arguments", currentArgs + args)
+                                                                        
+                                                                        // 【流式输出】解析并流式输出参数（包括参数值的增量）
+                                                                        val events = toolCallState.getParser(index).feed(args)
+                                                                        emitter.handleJsonEvents(events)
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        
+                                                        // 检查finish_reason，如果是tool_calls，输出参数和工具的结束标签
+                                                        val finishReason = choice.optString("finish_reason", "")
+                                                        if (finishReason == "tool_calls" && accumulatedToolCalls.isNotEmpty()) {
+                                                            // 按index排序，输出每个tool call的结束标签
+                                                            accumulatedToolCalls.values.sortedBy { it.getInt("index") }.forEach { toolCall ->
+                                                                val index = toolCall.getInt("index")
+                                                                val function = toolCall.getJSONObject("function")
+                                                                val toolName = function.getString("name")
+                                                                val argsJson = function.optString("arguments", "{}")
+                                                                
+                                                                // 最后一次尝试输出任何遗漏的参数增量
+                                                                val events = toolCallState.getParser(index).flush()
+                                                                emitter.handleJsonEvents(events)
+                                                                
+                                                                // 输出工具结束标签
+                                                                emitter.emitTag("\n</tool>")
+                                                                Log.d("AIService", "Tool Call流式完成: $toolName")
+                                                            }
+                                                            
+                                                            onTokensUpdated(tokenCacheManager.totalInputTokenCount, tokenCacheManager.cachedInputTokenCount, tokenCacheManager.outputTokenCount)
+                                                            
+                                                            // 清空累积器
+                                                            accumulatedToolCalls.clear()
+                                                            toolCallState.clear()
+                                                        }
+                                                        
                                                         // 检查是否有思考内容
                                                         val reasoningContent =
                                                                 delta.optString(
@@ -495,62 +1206,32 @@ open class OpenAIProvider(
                                                                 delta.optString("content", "")
 
                                                         // 处理思考内容
-                                                        if (reasoningContent.isNotEmpty() &&
-                                                                        reasoningContent != "null"
-                                                        ) {
+                                                        if (reasoningContent.isNotNullOrEmpty()) {
                                                             if (!isInReasoningMode) {
                                                                 isInReasoningMode = true
-                                                                // 第一次发现思考内容，发射<think>开始标签
                                                                 if (!hasEmittedThinkStart) {
-                                                                    emit("<think>")
-                                                                    receivedContent.append("<think>")
+                                                                    emitter.emitTag("<think>")
                                                                     hasEmittedThinkStart = true
                                                                 }
                                                             }
-                                                            // 发射思考内容
-                                                            emit(reasoningContent)
-                                                            receivedContent.append(reasoningContent)
-                                                            tokenCacheManager.addOutputTokens(
-                                                                    ChatUtils.estimateTokenCount(
-                                                                            reasoningContent
-                                                                    )
-                                                            )
-                                                            onTokensUpdated(tokenCacheManager.totalInputTokenCount, tokenCacheManager.cachedInputTokenCount, tokenCacheManager.outputTokenCount)
+                                                            emitter.emitContent(reasoningContent)
                                                         }
                                                         // 处理常规内容
-                                                        else if (regularContent.isNotEmpty() &&
-                                                                        regularContent != "null"
-                                                        ) {
+                                                        else if (regularContent.isNotNullOrEmpty()) {
                                                             // 如果之前在思考模式，现在切换到了常规内容，需要关闭思考标签
                                                             if (isInReasoningMode) {
                                                                 isInReasoningMode = false
-                                                                emit("</think>")
-                                                                receivedContent.append("</think>")
+                                                                emitter.emitTag("</think>")
                                                             }
 
                                                             // 当收到第一个有效内容时，标记不再是首次响应
                                                             if (isFirstResponse) {
                                                                 isFirstResponse = false
-                                                                Log.d(
-                                                                        "AIService",
-                                                                        "【发送消息】收到首个有效内容片段"
-                                                                )
+                                                                Log.d("AIService", "【发送消息】收到首个有效内容片段")
                                                             }
 
-                                                            // 更新内容
                                                             currentContent.append(regularContent)
-                                                            receivedContent.append(regularContent)
-
-                                                            // 计算输出tokens
-                                                            tokenCacheManager.addOutputTokens(
-                                                                    ChatUtils.estimateTokenCount(
-                                                                            regularContent
-                                                                    )
-                                                            )
-                                                            onTokensUpdated(tokenCacheManager.totalInputTokenCount, tokenCacheManager.cachedInputTokenCount, tokenCacheManager.outputTokenCount)
-
-                                                            // 发射内容
-                                                            emit(regularContent)
+                                                            emitter.emitContent(regularContent)
                                                         }
                                                     }
                                                     // 处理message格式（非流式响应）
@@ -567,35 +1248,13 @@ open class OpenAIProvider(
                                                                     message.optString("content", "")
 
                                                             // 先处理思考内容（如果有）
-                                                            if (reasoningContent.isNotEmpty() &&
-                                                                            reasoningContent !=
-                                                                                    "null"
-                                                            ) {
-                                                                val thinkContent = "<think>" +
-                                                                        reasoningContent +
-                                                                        "</think>"
-                                                                emit(thinkContent)
-                                                                receivedContent.append(thinkContent)
-                                                                tokenCacheManager.addOutputTokens(
-                                                                        ChatUtils.estimateTokenCount(
-                                                                                reasoningContent
-                                                                        )
-                                                                )
-                                                                onTokensUpdated(tokenCacheManager.totalInputTokenCount, tokenCacheManager.cachedInputTokenCount, tokenCacheManager.outputTokenCount)
+                                                            if (reasoningContent.isNotNullOrEmpty()) {
+                                                                emitter.emitThinkContent(reasoningContent)
                                                             }
 
                                                             // 然后处理常规内容
-                                                            if (regularContent.isNotEmpty() &&
-                                                                            regularContent != "null"
-                                                            ) {
-                                                                emit(regularContent)
-                                                                receivedContent.append(regularContent)
-                                                                tokenCacheManager.addOutputTokens(
-                                                                        ChatUtils.estimateTokenCount(
-                                                                                regularContent
-                                                                        )
-                                                                )
-                                                                onTokensUpdated(tokenCacheManager.totalInputTokenCount, tokenCacheManager.cachedInputTokenCount, tokenCacheManager.outputTokenCount)
+                                                            if (regularContent.isNotNullOrEmpty()) {
+                                                                emitter.emitContent(regularContent)
                                                             }
                                                         }
                                                     }
@@ -608,8 +1267,7 @@ open class OpenAIProvider(
                                             // 收到流结束标记，如果还在思考模式，确保关闭思考标签
                                             if (isInReasoningMode) {
                                                 isInReasoningMode = false
-                                                emit("</think>")
-                                                receivedContent.append("</think>")
+                                                emitter.emitTag("</think>")
                                             }
                                             Log.d("AIService", "【发送消息】收到流结束标记[DONE]")
                                         }
@@ -641,6 +1299,8 @@ open class OpenAIProvider(
                             val responseText = responseBody.string()
                             Log.d("AIService", "收到完整响应，长度: ${responseText.length}")
                             
+                            val emitter = StreamEmitter(receivedContent, ::emit, onTokensUpdated)
+                            
                             try {
                                 val jsonResponse = JSONObject(responseText)
                                 val choices = jsonResponse.getJSONArray("choices")
@@ -650,26 +1310,27 @@ open class OpenAIProvider(
                                     val message = choice.optJSONObject("message")
                                     
                                     if (message != null) {
+                                        // 检查是否有tool_calls（Tool Call API）
+                                        val toolCalls = message.optJSONArray("tool_calls")
+                                        if (toolCalls != null && toolCalls.length() > 0 && enableToolCall) {
+                                            val xmlToolCalls = convertToolCallsToXml(toolCalls)
+                                            if (xmlToolCalls.isNotEmpty()) {
+                                                emitter.emitContent("\n" + xmlToolCalls)
+                                                Log.d("AIService", "Tool Call转XML (非流式): $xmlToolCalls")
+                                            }
+                                        }
+                                        
                                         val reasoningContent = message.optString("reasoning_content", "")
                                         val regularContent = message.optString("content", "")
                                         
                                         // 处理思考内容（如果有）
-                                        if (reasoningContent.isNotEmpty() && reasoningContent != "null") {
-                                            val thinkContent = "<think>" + reasoningContent + "</think>"
-                                            // 直接发送整个内容块，下游会自己处理
-                                            emit(thinkContent)
-                                            receivedContent.append(thinkContent)
-                                            tokenCacheManager.addOutputTokens(ChatUtils.estimateTokenCount(reasoningContent))
-                                            onTokensUpdated(tokenCacheManager.totalInputTokenCount, tokenCacheManager.cachedInputTokenCount, tokenCacheManager.outputTokenCount)
+                                        if (reasoningContent.isNotNullOrEmpty()) {
+                                            emitter.emitThinkContent(reasoningContent)
                                         }
                                         
                                         // 处理常规内容
-                                        if (regularContent.isNotEmpty() && regularContent != "null") {
-                                            // 直接发送整个内容块，下游会自己处理
-                                            emit(regularContent)
-                                            receivedContent.append(regularContent)
-                                            tokenCacheManager.addOutputTokens(ChatUtils.estimateTokenCount(regularContent))
-                                            onTokensUpdated(tokenCacheManager.totalInputTokenCount, tokenCacheManager.cachedInputTokenCount, tokenCacheManager.outputTokenCount)
+                                        if (regularContent.isNotNullOrEmpty()) {
+                                            emitter.emitContent(regularContent)
                                         }
                                     }
                                 }
@@ -711,56 +1372,32 @@ open class OpenAIProvider(
                 Log.e("AIService", "【发送消息】发生不可重试错误", e)
                 throw e // 直接抛出，不重试
             } catch (e: SocketTimeoutException) {
-                if (isManuallyCancelled) {
-                    Log.d("AIService", "请求被用户取消，停止重试。")
-                    throw UserCancellationException("请求已被用户取消", e)
-                }
                 lastException = e
-                retryCount++
-                if (retryCount >= maxRetries) {
-                    Log.e("AIService", "【发送消息】连接超时且达到最大重试次数", e)
-                    throw IOException("AI响应获取失败，连接超时且已达最大重试次数: ${e.message}")
-                }
-                Log.w("AIService", "【发送消息】连接超时，正在进行第 $retryCount 次重试...", e)
-                onNonFatalError("【网络超时，正在进行第 $retryCount 次重试...】")
-                // 指数退避重试
-                delay(1000L * (1 shl (retryCount - 1)))
+                retryCount = handleRetryableError(
+                    e, retryCount, maxRetries,
+                    "连接超时",
+                    "AI响应获取失败，连接超时且已达最大重试次数: ${e.message}",
+                    onNonFatalError
+                )
             } catch (e: UnknownHostException) {
-                if (isManuallyCancelled) {
-                    Log.d("AIService", "请求被用户取消，停止重试。")
-                    throw UserCancellationException("请求已被用户取消", e)
-                }
-                // 对于无法解析主机这类错误，也应该重试，因为网络可能会恢复（例如切换wifi）
                 lastException = e
-                retryCount++
-                if (retryCount >= maxRetries) {
-                    Log.e("AIService", "【发送消息】无法解析主机且达到最大重试次数", e)
-                throw IOException("无法连接到服务器，请检查网络连接或API地址是否正确")
-                }
-                Log.w("AIService", "【发送消息】无法解析主机，正在进行第 $retryCount 次重试...", e)
-                onNonFatalError("【网络不稳定，正在进行第 $retryCount 次重试...】")
-                delay(1000L * (1 shl (retryCount - 1)))
+                retryCount = handleRetryableError(
+                    e, retryCount, maxRetries,
+                    "无法解析主机",
+                    "无法连接到服务器，请检查网络连接或API地址是否正确",
+                    onNonFatalError
+                )
             } catch (e: IOException) {
-                if (isManuallyCancelled) {
-                    Log.d("AIService", "请求被用户取消，停止重试。")
-                    throw UserCancellationException("请求已被用户取消", e)
-                }
-                // 这个catch块现在主要处理来自流读取中断的IO异常
                 lastException = e
-                retryCount++
-                if (retryCount >= maxRetries) {
-                    Log.e("AIService", "【发送消息】达到最大重试次数，无法恢复", e)
-                    throw IOException("AI响应获取失败，已达最大重试次数: ${e.message}")
-                }
-                Log.w("AIService", "【发送消息】网络中断，正在进行第 $retryCount 次重试...", e)
-                onNonFatalError("【网络中断，正在进行第 $retryCount 次重试...】")
-                delay(1000L * (1 shl (retryCount - 1))) // 增加延迟
+                retryCount = handleRetryableError(
+                    e, retryCount, maxRetries,
+                    "网络中断",
+                    "AI响应获取失败，已达最大重试次数: ${e.message}",
+                    onNonFatalError
+                )
             } catch (e: Exception) {
-                if (isManuallyCancelled) {
-                    Log.d("AIService", "请求被用户取消，停止重试。")
-                    throw UserCancellationException("请求已被用户取消", e)
-                }
-                 // 其他未知异常，不应重试
+                checkCancellation(e)
+                // 其他未知异常，不应重试
                 Log.e("AIService", "【发送消息】发生未知异常，停止重试", e)
                 throw IOException("AI响应获取失败: ${e.message}", e)
             }

@@ -47,6 +47,9 @@ import kotlinx.coroutines.awaitAll
 import com.ai.assistance.operit.data.repository.CustomEmojiRepository
 import com.ai.assistance.operit.data.preferences.CharacterCardManager
 import com.ai.assistance.operit.data.preferences.UserPreferencesManager
+import com.ai.assistance.operit.core.config.SystemToolPrompts
+import com.ai.assistance.operit.data.model.ToolPrompt
+import com.ai.assistance.operit.util.LocaleUtils
 
 /**
  * Enhanced AI service that provides advanced conversational capabilities by integrating various
@@ -401,7 +404,8 @@ class EnhancedAIService private constructor(private val context: Context) {
                                     thinkingGuidance,
                                     customSystemPromptTemplate,
                                     enableMemoryQuery,
-                                    isSubTask
+                                    isSubTask,
+                                    functionType
                             )
                     
                     // 关键修复：用准备好的历史记录（包含了系统提示）去同步更新内部的 conversationHistory 状态
@@ -424,6 +428,9 @@ class EnhancedAIService private constructor(private val context: Context) {
                     // 清空之前的单次请求token计数
                     _perRequestTokenCounts.value = null
 
+                    // 获取工具列表（如果启用Tool Call）
+                    val availableTools = getAvailableToolsForFunction(functionType)
+                    
                     // 使用新的Stream API
                     Log.d(TAG, "调用AI服务，处理时间: ${System.currentTimeMillis() - startTime}ms, 流式输出: $stream")
                     val responseStream =
@@ -433,6 +440,7 @@ class EnhancedAIService private constructor(private val context: Context) {
                                     modelParameters = modelParameters,
                                     enableThinking = enableThinking,
                                     stream = stream,
+                                    availableTools = availableTools,
                                     onTokensUpdated = { input, cachedInput, output ->
                                         _perRequestTokenCounts.value = Pair(input, output)
                                     },
@@ -1002,6 +1010,9 @@ class EnhancedAIService private constructor(private val context: Context) {
         // 清空之前的单次请求token计数
         _perRequestTokenCounts.value = null
 
+        // 获取工具列表（如果启用Tool Call）
+        val availableTools = getAvailableToolsForFunction(functionType)
+        
         // 使用新的Stream API处理工具执行结果
         withContext(Dispatchers.IO) {
             try {
@@ -1014,6 +1025,7 @@ class EnhancedAIService private constructor(private val context: Context) {
                                 modelParameters = modelParameters,
                                 enableThinking = enableThinking,
                                 stream = stream,
+                                availableTools = availableTools,
                                 onTokensUpdated = { input, cachedInput, output ->
                                     _perRequestTokenCounts.value = Pair(input, output)
                                 },
@@ -1164,11 +1176,16 @@ class EnhancedAIService private constructor(private val context: Context) {
             thinkingGuidance: Boolean,
             customSystemPromptTemplate: String? = null,
             enableMemoryQuery: Boolean,
-            isSubTask: Boolean = false
+            isSubTask: Boolean = false,
+            functionType: FunctionType = FunctionType.CHAT
     ): List<Pair<String, String>> {
         // Check if image recognition service is configured
         // For subtasks, always disable image recognition (only support OCR)
         val hasImageRecognition = if (isSubTask) false else multiServiceManager.hasImageRecognitionConfigured()
+        
+        // 检查是否启用Tool Call API
+        val config = multiServiceManager.getModelConfigForFunction(functionType)
+        val useToolCallApi = config.enableToolCall
         
         return conversationService.prepareConversationHistory(
                 chatHistory,
@@ -1179,7 +1196,8 @@ class EnhancedAIService private constructor(private val context: Context) {
                 thinkingGuidance,
                 customSystemPromptTemplate,
                 enableMemoryQuery,
-                hasImageRecognition
+                hasImageRecognition,
+                useToolCallApi
         )
     }
 
@@ -1217,6 +1235,43 @@ class EnhancedAIService private constructor(private val context: Context) {
     /** Cancel all tool executions */
     private fun cancelAllToolExecutions() {
         toolProcessingScope.coroutineContext.cancelChildren()
+    }
+
+    /**
+     * 获取可用工具列表（用于Tool Call API）
+     * 如果模型配置启用了Tool Call，返回工具列表；否则返回null
+     */
+    private suspend fun getAvailableToolsForFunction(functionType: FunctionType): List<ToolPrompt>? {
+        return try {
+            // 获取对应功能类型的模型配置
+            val config = multiServiceManager.getModelConfigForFunction(functionType)
+            
+            // 检查是否启用Tool Call
+            if (!config.enableToolCall) {
+                return null
+            }
+            
+            // 获取所有工具分类
+            val isEnglish = LocaleUtils.getCurrentLanguage(context) == "en"
+            val categories = if (isEnglish) {
+                SystemToolPrompts.getAllCategoriesEn(
+                    hasImageRecognition = config.enableDirectImageProcessing
+                )
+            } else {
+                SystemToolPrompts.getAllCategoriesCn(
+                    hasImageRecognition = config.enableDirectImageProcessing
+                )
+            }
+            
+            // 提取所有工具
+            val allTools = categories.flatMap { it.tools }
+            
+            Log.d(TAG, "Tool Call已启用，提供 ${allTools.size} 个工具")
+            allTools
+        } catch (e: Exception) {
+            Log.e(TAG, "获取工具列表失败", e)
+            null
+        }
     }
 
     // --- Service Lifecycle Management ---

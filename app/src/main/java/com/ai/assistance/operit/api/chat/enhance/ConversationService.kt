@@ -174,7 +174,8 @@ class ConversationService(
             thinkingGuidance: Boolean = false,
             customSystemPromptTemplate: String? = null,
             enableMemoryQuery: Boolean = true,
-            hasImageRecognition: Boolean = false
+            hasImageRecognition: Boolean = false,
+            useToolCallApi: Boolean = false
     ): List<Pair<String, String>> {
         val preparedHistory = mutableListOf<Pair<String, String>>()
         conversationMutex.withLock {
@@ -215,7 +216,8 @@ class ConversationService(
                                 finalCustomSystemPromptTemplate,
                                 enableTools,
                                 enableMemoryQuery,
-                                hasImageRecognition
+                                hasImageRecognition,
+                                useToolCallApi
                 )
 
                 // 构建waifu特殊规则

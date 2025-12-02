@@ -76,177 +76,39 @@ PACKAGE SYSTEM
 - 这将显示包中的所有工具及其使用方法
 - 只有在激活包后，才能直接使用其工具"""
 
+    // Tool Call API 模式下的包系统说明（不使用XML格式）
+    private const val PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_EN = """
+PACKAGE SYSTEM
+- Some additional functionality is available through packages
+- To use a package, call the use_package function with the package_name parameter
+- This will show you all the tools in the package and how to use them
+- Only after activating a package, you can use its tools directly"""
+    private const val PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_CN = """
+包系统：
+- 一些额外功能通过包提供
+- 要使用包，调用 use_package 函数并传入 package_name 参数
+- 这将显示包中的所有工具及其使用方法
+- 只有在激活包后，才能直接使用其工具"""
+
     private fun getAvailableToolsEn(hasImageRecognition: Boolean): String {
-        val readFileDescription = if (hasImageRecognition) {
-            "- read_file: Read the content of a file. For image files (jpg, jpeg, png, gif, bmp), it automatically extracts text using OCR, or you can provide an 'intent' parameter to use vision model for analysis. Parameters: path (file path), intent (optional, user's question about the image, e.g., \"What's in this image?\", \"Extract formulas from this image\")"
-        } else {
-            "- read_file: Read the content of a file. For image files (jpg, jpeg, png, gif, bmp), it automatically extracts text using OCR. Parameters: path (file path)"
-        }
-        
-        return """
-Available tools:
-- sleep: Demonstration tool that pauses briefly. Parameters: duration_ms (milliseconds, default 1000, max 10000)
-- use_package: Activate a package for use in the current session. Parameters: package_name (name of the package to activate)
-
-File System Tools:
-**IMPORTANT: All file tools support an optional 'environment' parameter:**
-- environment (optional): Specifies the execution environment. Values: "android" (default, Android file system) or "linux" (local Ubuntu 24 terminal environment via proot). 
-  - When "linux" is specified, paths use Linux format (e.g., "/home/user/file.txt", "/etc/hosts") and operate in the local Ubuntu 24 environment.
-
-**SSH Remote File System:**
-- ssh_login: Login to a remote SSH server. After logging in, all file tools with environment="linux" will use this SSH connection instead of the local Ubuntu 24 terminal. Parameters: host (SSH server address), port (optional, default 22), username (required), password (required), enable_reverse_mount (optional, boolean, default false, enables reverse mounting of local storage to remote server)
-- ssh_exit: Logout from the SSH connection. After logout, file tools will resume using the local Ubuntu 24 terminal. No parameters required.
-
-- list_files: List files in a directory. Parameters: path (e.g. "/sdcard/Download")
-$readFileDescription
-- read_file_part: Read file content by line range. Parameters: path (file path), start_line (starting line number, 1-indexed, default 1), end_line (ending line number, 1-indexed, inclusive, optional, default start_line + 99)
-- apply_file: Applies edits to a file by finding and replacing content blocks, or directly overwrites the entire file.
-  - **How it works**: This tool has two modes:
-    1. **Edit Mode**: Locates code based on the content inside the `[OLD]` block (not by line numbers) and replaces it with the content from the `[NEW]` block.
-    2. **Overwrite Mode**: If no edit blocks (REPLACE/DELETE) are present, the entire content parameter will overwrite the file. This is useful for creating new files or completely rewriting existing ones.
-  - **CRITICAL RULES**:
-    1.  **Use Semantic Blocks**: `REPLACE` requires both `[OLD]` and `[NEW]` blocks. `DELETE` only requires an `[OLD]` block.
-    2.  **Correct Syntax**: All tags (e.g., `[START-REPLACE]`, `[OLD]`) must be on their own lines.
-    3.  **Overwrite**: To overwrite a file, simply provide the content without any edit blocks.
-
-  - **Operations & Examples**:
-    - **Replace**: `[START-REPLACE]`
-      [OLD]
-      ...content to be replaced...
-      [/OLD]
-      [NEW]
-      ...new content...
-      [/NEW]
-      [END-REPLACE]
-    - **Delete**: `[START-DELETE]`
-      [OLD]
-      ...content to be deleted...
-      [/OLD]
-      [END-DELETE]
-    - **Overwrite**: Simply provide the full file content without any blocks (will replace entire file)
-
-  - **Parameters**: path (file path), content (the string containing all your edit blocks, or the full file content for overwrite mode)
-- delete_file: Delete a file or directory. Parameters: path (target path), recursive (boolean, default false)
-- file_exists: Check if a file or directory exists. Parameters: path (target path)
-- move_file: Move or rename a file or directory. Parameters: source (source path), destination (destination path)
-- copy_file: Copy a file or directory. Supports cross-environment copying between Android and Linux. Parameters: source (source path), destination (destination path), recursive (boolean, default false), source_environment (optional, "android" or "linux", default "android"), dest_environment (optional, "android" or "linux", default "android"). For cross-environment copy (e.g., Android → Linux or Linux → Android), specify both source_environment and dest_environment.
-- make_directory: Create a directory. Parameters: path (directory path), create_parents (boolean, default false)
-- find_files: Search for files matching a pattern. Parameters: path (search path, for Android use /sdcard/..., for Linux use /home/... or /etc/...), pattern (search pattern, e.g. "*.jpg"), max_depth (optional, controls depth of subdirectory search, -1=unlimited), use_path_pattern (boolean, default false), case_insensitive (boolean, default false)
-- grep_code: Search code content matching a regex pattern in files. Returns matches with surrounding context lines. Parameters: path (search path), pattern (regex pattern), file_pattern (file filter, default "*"), case_insensitive (boolean, default false), context_lines (lines of context before/after match, default 3), max_results (max matches, default 100)
-- grep_context: Search for relevant content based on intent/context understanding. Supports two modes: 1) Directory mode: when path is a directory, finds most relevant files. 2) File mode: when path is a file, finds most relevant code segments within that file. Uses semantic relevance scoring. Parameters: path (directory or file path), intent (intent or context description string), file_pattern (file filter for directory mode, default "*"), max_results (maximum items to return, default 10)
-- file_info: Get detailed information about a file or directory including type, size, permissions, owner, group, and last modified time. Parameters: path (target path)
-- zip_files: Compress files or directories. Parameters: source (path to compress), destination (output zip file)
-- unzip_files: Extract a zip file. Parameters: source (zip file path), destination (extract path)
-- open_file: Open a file using the system's default application. Parameters: path (file path)
-- share_file: Share a file with other applications. Parameters: path (file path), title (optional share title, default "Share File")
-- download_file: Download a file from the internet. Parameters: url (file URL), destination (save path)
-
-HTTP Tools:
-- http_request: Send HTTP request. Parameters: url, method (GET/POST/PUT/DELETE), headers, body, body_type (json/form/text/xml)
-- multipart_request: Upload files. Parameters: url, method (POST/PUT), headers, form_data, files (file array)
-- manage_cookies: Manage cookies. Parameters: action (get/set/clear), domain, cookies
-- visit_web: Visit a webpage and extract its content. This tool can be used in two ways: 1. Provide a `url` to visit a new page. 2. Provide a `visit_key` from a previous search result and a `link_number` to visit a specific link from that search. This is the preferred way to follow up on a search. Parameters: url (optional, webpage URL), visit_key (optional, string, the key from a previous search), link_number (optional, int, the number of the link to visit from the search results)"""
+        return SystemToolPrompts.generateToolsPromptEn(
+            hasImageRecognition = hasImageRecognition,
+            includeMemoryTools = false
+        )
     }
     
-    private const val MEMORY_TOOLS_EN = """
-Memory and Memory Library Tools:
-- query_memory: Searches the memory library for relevant memories using hybrid search (keyword matching + semantic understanding). Use this when you need to recall past knowledge, look up specific information, or require context. Keywords can be separated by '|' or spaces - each keyword will be independently matched semantically and the results will be combined with weighted scoring. You can use "*" as the query to return all memories (optionally filtered by folder_path). When the user attaches a memory folder, a `<memory_context>` will be provided in the prompt. You MUST use the `folder_path` parameter to restrict the search to that folder. **IMPORTANT**: For document nodes (uploaded files), this tool uses vector search to return ONLY the most relevant chunks matching your query, NOT the entire document. Results show "Document: [name], Chunk X/Y: [content]" format. To read the complete document or specific parts, use `get_memory_by_title` instead. **NOTE**: When limit > 20, results will only show titles and truncated content to save tokens. Parameters: query (string, the keyword or question to search for, or "*" to return all memories), folder_path (optional, string, the specific folder path to search within), threshold (optional, float 0.0-1.0, semantic similarity threshold, default 0.25, lower values return more results), limit (optional, int >= 1, maximum number of results to return, default 5. When > 20, only titles and truncated content are returned)
-- get_memory_by_title: Retrieves a memory by exact title. For regular memories, returns full content. For document nodes (uploaded files), you can: 1) Read entire document (no parameters), 2) Read specific chunk(s) via `chunk_index` (e.g., "3") or `chunk_range` (e.g., "3-7"), 3) Search within document via `query`. Use this when query_memory returns partial results and you need more complete content. Parameters: title (required, string, the exact title of the memory), chunk_index (optional, int, read a specific chunk by its number, e.g., 3 for the 3rd chunk), chunk_range (optional, string, read a range of chunks in "start-end" format, e.g., "3-7" for chunks 3 through 7), query (optional, string, search for matching chunks within the document using keywords or semantic search)
-- create_memory: Creates a new memory node in the library. Use this when you want to save important information for future reference. Parameters: title (required, string), content (required, string), content_type (optional, default "text/plain"), source (optional, default "ai_created"), folder_path (optional, default "")
-- update_memory: Updates an existing memory node by title. Use this to modify an existing memory's content or metadata. Parameters: old_title (required, string to identify the memory), new_title (optional, string, new title if renaming), content (optional, string), content_type (optional, string), source (optional, string), credibility (optional, float 0-1), importance (optional, float 0-1), folder_path (optional, string), tags (optional, comma-separated string)
-- delete_memory: Deletes a memory node from the library by title. Use with caution as this operation is irreversible. Parameters: title (required, string to identify the memory)
-- link_memories: Creates a semantic link between two memories in the library. Use this to establish relationships between related concepts, facts, or pieces of information. This helps build a knowledge graph structure for better memory retrieval and understanding. Parameters: source_title (required, string, the title of the source memory), target_title (required, string, the title of the target memory), link_type (optional, string, the type of relationship such as "related", "causes", "explains", "part_of", "contradicts", etc., default "related"), weight (optional, float 0.0-1.0, the strength of the link with 1.0 being strongest, default 0.7), description (optional, string, additional context about the relationship, default "")
-- update_user_preferences: Updates user preference information directly. Use this when you learn new information about the user that should be remembered (e.g., their birthday, gender, personality traits, identity, occupation, or preferred AI interaction style). This allows immediate updates without waiting for the automatic system. Parameters: birth_date (optional, Unix timestamp in milliseconds), gender (optional, string), personality (optional, string describing personality traits), identity (optional, string describing identity/role), occupation (optional, string), ai_style (optional, string describing preferred AI interaction style). At least one parameter must be provided.
-
-Note: The memory library and user personality profile are automatically updated by a separate system after you output the task completion marker. However, if you need to manage memories immediately or update user preferences, use the appropriate tools directly.
-
-"""
+    private val MEMORY_TOOLS_EN: String
+        get() = SystemToolPrompts.memoryTools.toString()
 
     private fun getAvailableToolsCn(hasImageRecognition: Boolean): String {
-        val readFileDescription = if (hasImageRecognition) {
-            "- read_file: 读取文件内容。对于图片文件(jpg, jpeg, png, gif, bmp)，默认使用OCR提取文本，也可提供'intent'参数使用视觉模型分析。参数：path（文件路径），intent（可选，用户对图片的问题，如\"这个图片里面有什么\"、\"提取图片中的公式\"）"
-        } else {
-            "- read_file: 读取文件内容。对于图片文件(jpg, jpeg, png, gif, bmp)，自动使用OCR提取文本。参数：path（文件路径）"
-        }
-        
-        return """
-可用工具：
-- sleep: 演示工具，短暂暂停。参数：duration_ms（毫秒，默认1000，最大10000）
-- use_package: 在当前会话中激活包。参数：package_name（要激活的包名）
-
-文件系统工具：
-**重要：所有文件工具都支持可选的'environment'参数：**
-- environment（可选）：指定执行环境。取值："android"（默认，Android文件系统）或"linux"（本地Ubuntu 24终端环境，通过proot实现）。
-  - 当指定"linux"时，路径使用Linux格式（如"/home/user/file.txt"、"/etc/hosts"），在本地Ubuntu 24环境中操作。
-
-**SSH远程文件系统：**
-- ssh_login: 登录远程SSH服务器。登录后，所有environment="linux"的文件工具都将使用此SSH连接，而不是本地Ubuntu 24终端。参数：host（SSH服务器地址），port（可选，默认22），username（必填），password（必填），enable_reverse_mount（可选，布尔值，默认false，启用后将本地存储反向挂载到远程服务器）
-- ssh_exit: 退出SSH连接。退出后，文件工具将恢复使用本地Ubuntu 24终端。无需参数。
-
-- list_files: 列出目录中的文件。参数：path（例如"/sdcard/Download"）
-$readFileDescription
-- read_file_part: 按行号范围读取文件内容。参数：path（文件路径），start_line（起始行号，从1开始，默认1），end_line（结束行号，从1开始，包括该行，可选，默认为start_line + 99）
-- apply_file: 通过查找并替换内容块来编辑文件，或直接覆盖整个文件。
-  - **工作原理**: 此工具有两种模式：
-    1. **编辑模式**: 根据 `[OLD]` 块中的内容（而不是行号）来定位代码，然后用 `[NEW]` 块中的内容替换它。
-    2. **覆盖模式**: 如果没有编辑块（REPLACE/DELETE），整个 content 参数的内容将覆盖文件。这对于创建新文件或完全重写现有文件很有用。
-  - **关键规则**:
-    1.  **使用语义块**: `REPLACE` 操作需要同时包含 `[OLD]` 和 `[NEW]` 块。`DELETE` 操作只需要 `[OLD]` 块。
-    2.  **正确的语法**: 所有标签（例如 `[START-REPLACE]`, `[OLD]`）都必须独占一行。
-    3.  **覆盖**: 要覆盖文件，只需提供内容而不使用任何编辑块。
-
-  - **操作示例**:
-    - **替换**: `[START-REPLACE]`
-      [OLD]
-      ...要被替换的内容...
-      [/OLD]
-      [NEW]
-      ...新的内容...
-      [/NEW]
-      [END-REPLACE]
-    - **删除**: `[START-DELETE]`
-      [OLD]
-      ...要被删除的内容...
-      [/OLD]
-      [END-DELETE]
-    - **覆盖**: 直接提供完整的文件内容而不使用任何块（将替换整个文件）
-
-  - **参数**: path (文件路径), content (包含所有编辑块的字符串，或用于覆盖模式的完整文件内容)
-- delete_file: 删除文件或目录。参数：path（目标路径），recursive（布尔值，默认false）
-- file_exists: 检查文件或目录是否存在。参数：path（目标路径）
-- move_file: 移动或重命名文件或目录。参数：source（源路径），destination（目标路径）
-- copy_file: 复制文件或目录。支持Android和Linux之间的跨环境复制。参数：source（源路径），destination（目标路径），recursive（布尔值，默认false），source_environment（可选，"android"或"linux"，默认"android"），dest_environment（可选，"android"或"linux"，默认"android"）。跨环境复制（如Android → Linux或Linux → Android）时，需指定source_environment和dest_environment。
-- make_directory: 创建目录。参数：path（目录路径），create_parents（布尔值，默认false）
-- find_files: 搜索匹配模式的文件。参数：path（搜索路径，Android用/sdcard/...，Linux用/home/...或/etc/...），pattern（搜索模式，例如"*.jpg"），max_depth（可选，控制子目录搜索深度，-1=无限），use_path_pattern（布尔值，默认false），case_insensitive（布尔值，默认false）
-- grep_code: 在文件中搜索匹配正则表达式的代码内容，返回带上下文的匹配结果。参数：path（搜索路径），pattern（正则表达式模式），file_pattern（文件过滤，默认"*"），case_insensitive（布尔值，默认false），context_lines（匹配行前后的上下文行数，默认3），max_results（最大匹配数，默认100）
-- grep_context: 基于意图/上下文理解搜索相关内容。支持两种模式：1) 目录模式：当path是目录时，找出最相关的文件。2) 文件模式：当path是文件时，找出该文件内最相关的代码段。使用语义相关性评分。参数：path（目录或文件路径），intent（意图或上下文描述字符串），file_pattern（目录模式下的文件过滤，默认"*"），max_results（返回的最大项数，默认10）
-- file_info: 获取文件或目录的详细信息，包括类型、大小、权限、所有者、组和最后修改时间。参数：path（目标路径）
-- zip_files: 压缩文件或目录。参数：source（要压缩的路径），destination（输出zip文件）
-- unzip_files: 解压zip文件。参数：source（zip文件路径），destination（解压路径）
-- open_file: 使用系统默认应用程序打开文件。参数：path（文件路径）
-- share_file: 与其他应用程序共享文件。参数：path（文件路径），title（可选的共享标题，默认"Share File"）
-- download_file: 从互联网下载文件。参数：url（文件URL），destination（保存路径）
-
-HTTP工具：
-- http_request: 发送HTTP请求。参数：url, method (GET/POST/PUT/DELETE), headers, body, body_type (json/form/text/xml)
-- multipart_request: 上传文件。参数：url, method (POST/PUT), headers, form_data, files (文件数组)
-- manage_cookies: 管理cookies。参数：action (get/set/clear), domain, cookies
-- visit_web: 访问网页并提取内容。此工具有两种用法：1. 提供 `url` 访问新页面。2. 提供先前搜索结果中的 `visit_key` 和 `link_number` 来访问该搜索中的特定链接。这是跟进搜索的首选方式。参数：url (可选, 网页URL), visit_key (可选, 字符串, 上一次搜索返回的密钥), link_number (可选, 整数, 要访问的搜索结果链接的编号)"""
+        return SystemToolPrompts.generateToolsPromptCn(
+            hasImageRecognition = hasImageRecognition,
+            includeMemoryTools = false
+        )
     }
     
-    private const val MEMORY_TOOLS_CN = """
-记忆与记忆库工具：
-- query_memory: 使用混合搜索（关键词匹配 + 语义理解）从记忆库中搜索相关记忆。当需要回忆过去的知识、查找特定信息或需要上下文时使用。关键词可以使用"|"或空格分隔 - 每个关键词都会独立进行语义匹配，结果将通过加权评分合并。可以使用 "*" 作为查询来返回所有记忆（可通过 folder_path 过滤）。当用户附加记忆文件夹时，提示中会提供`<memory_context>`。你必须使用 `folder_path` 参数将搜索限制在该文件夹内。**重要**：对于文档节点（上传的文件），此工具使用向量搜索只返回与查询最相关的分块，而不是整个文档。结果显示"Document: [文档名], Chunk X/Y: [内容]"格式。如需阅读完整文档或特定部分，请改用 `get_memory_by_title` 工具。**注意**：当 limit > 20 时，结果将只显示标题和截断内容以节省令牌。参数：query (string, 搜索的关键词或问题, 或使用 "*" 返回所有记忆), folder_path (可选, string, 要搜索的特定文件夹路径), threshold (可选, float 0.0-1.0, 语义相似度阈值, 默认0.25, 较低的值返回更多结果), limit (可选, int >= 1, 返回结果的最大数量, 默认5. 当 > 20 时，只返回标题和截断内容)
-- get_memory_by_title: 通过精确标题检索记忆。对于普通记忆，返回完整内容。对于文档节点（上传的文件），可以：1) 读取整个文档（不提供参数），2) 通过 `chunk_index`（如"3"）或 `chunk_range`（如"3-7"）读取特定分块，3) 通过 `query` 在文档内搜索。当 query_memory 返回部分结果而你需要更完整内容时使用。参数：title (必需, 字符串, 记忆的精确标题), chunk_index (可选, 整数, 读取特定编号的分块, 例如3表示第3块), chunk_range (可选, 字符串, 读取分块范围，格式为"起始-结束"，例如"3-7"表示第3到第7块), query (可选, 字符串, 使用关键词或语义搜索在文档内查找匹配的分块)
-- create_memory: 在记忆库中创建新的记忆节点。当你想保存重要信息供将来参考时使用。参数：title (必需, 字符串), content (必需, 字符串), content_type (可选, 默认"text/plain"), source (可选, 默认"ai_created"), folder_path (可选, 默认"")
-- update_memory: 通过标题更新现有的记忆节点。用于修改现有记忆的内容或元数据。参数：old_title (必需, 字符串，用于识别记忆), new_title (可选, 字符串, 重命名时的新标题), content (可选, 字符串), content_type (可选, 字符串), source (可选, 字符串), credibility (可选, 浮点数 0-1), importance (可选, 浮点数 0-1), folder_path (可选, 字符串), tags (可选, 逗号分隔的字符串)
-- delete_memory: 通过标题从记忆库中删除记忆节点。谨慎使用，此操作不可逆。参数：title (必需, 字符串，用于识别记忆)
-- link_memories: 在记忆库中的两个记忆之间创建语义链接。用于建立相关概念、事实或信息片段之间的关系。这有助于构建知识图谱结构，以便更好地检索和理解记忆。参数：source_title (必需, 字符串, 源记忆的标题), target_title (必需, 字符串, 目标记忆的标题), link_type (可选, 字符串, 关系类型，如"related"（相关）、"causes"（导致）、"explains"（解释）、"part_of"（部分）、"contradicts"（矛盾）等, 默认"related"), weight (可选, 浮点数 0.0-1.0, 链接强度，1.0表示最强, 默认0.7), description (可选, 字符串, 关于关系的额外上下文, 默认"")
-- update_user_preferences: 直接更新用户偏好信息。当你了解到用户的新信息时使用（例如生日、性别、性格特征、身份、职业或首选AI交互风格）。这允许立即更新而无需等待自动系统。参数：birth_date (可选, Unix时间戳，毫秒), gender (可选, 字符串), personality (可选, 描述性格特征的字符串), identity (可选, 描述身份/角色的字符串), occupation (可选, 字符串), ai_style (可选, 描述首选AI交互风格的字符串)。必须提供至少一个参数。
-
-注意：记忆库和用户性格档案会在你输出任务完成标志后由独立的系统自动更新。但是，如果需要立即管理记忆或更新用户偏好，请直接使用相应的工具。
-
-"""
+    private val MEMORY_TOOLS_CN: String
+        get() = SystemToolPrompts.memoryToolsCn.toString()
 
 
     /** Base system prompt template used by the enhanced AI service */
@@ -390,7 +252,8 @@ AVAILABLE_TOOLS_SECTION""".trimIndent()
           customSystemPromptTemplate: String = "",
           enableTools: Boolean = true,
           enableMemoryQuery: Boolean = true,
-          hasImageRecognition: Boolean = false
+          hasImageRecognition: Boolean = false,
+          useToolCallApi: Boolean = false
   ): String {
     val importedPackages = packageManager.getImportedPackages()
     val mcpServers = packageManager.getAvailableServerPackages()
@@ -457,15 +320,28 @@ AVAILABLE_TOOLS_SECTION""".trimIndent()
             }
 
     // Determine the available tools string based on memory query setting and image recognition
-    val availableToolsEn = if (enableMemoryQuery) MEMORY_TOOLS_EN + getAvailableToolsEn(hasImageRecognition) else getAvailableToolsEn(hasImageRecognition)
-    val availableToolsCn = if (enableMemoryQuery) MEMORY_TOOLS_CN + getAvailableToolsCn(hasImageRecognition) else getAvailableToolsCn(hasImageRecognition)
+    // 当使用Tool Call API时，不在系统提示词中包含工具描述（工具已通过API的tools字段发送）
+    val availableToolsEn = if (useToolCallApi) "" else (
+        if (enableMemoryQuery) MEMORY_TOOLS_EN + getAvailableToolsEn(hasImageRecognition) else getAvailableToolsEn(hasImageRecognition)
+    )
+    val availableToolsCn = if (useToolCallApi) "" else (
+        if (enableMemoryQuery) MEMORY_TOOLS_CN + getAvailableToolsCn(hasImageRecognition) else getAvailableToolsCn(hasImageRecognition)
+    )
 
     // Handle tools disable/enable
     if (enableTools) {
-        prompt = prompt
-            .replace("TOOL_USAGE_GUIDELINES_SECTION", if (useEnglish) TOOL_USAGE_GUIDELINES_EN else TOOL_USAGE_GUIDELINES_CN)
-            .replace("PACKAGE_SYSTEM_GUIDELINES_SECTION", if (useEnglish) PACKAGE_SYSTEM_GUIDELINES_EN else PACKAGE_SYSTEM_GUIDELINES_CN)
-            .replace("AVAILABLE_TOOLS_SECTION", if (useEnglish) availableToolsEn else availableToolsCn)
+        // 当使用Tool Call API时，移除XML格式的工具使用指南，但保留包系统说明
+        if (useToolCallApi) {
+            prompt = prompt
+                .replace("TOOL_USAGE_GUIDELINES_SECTION", "")
+                .replace("PACKAGE_SYSTEM_GUIDELINES_SECTION", if (useEnglish) PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_EN else PACKAGE_SYSTEM_GUIDELINES_TOOL_CALL_CN)
+                .replace("AVAILABLE_TOOLS_SECTION", "")
+        } else {
+            prompt = prompt
+                .replace("TOOL_USAGE_GUIDELINES_SECTION", if (useEnglish) TOOL_USAGE_GUIDELINES_EN else TOOL_USAGE_GUIDELINES_CN)
+                .replace("PACKAGE_SYSTEM_GUIDELINES_SECTION", if (useEnglish) PACKAGE_SYSTEM_GUIDELINES_EN else PACKAGE_SYSTEM_GUIDELINES_CN)
+                .replace("AVAILABLE_TOOLS_SECTION", if (useEnglish) availableToolsEn else availableToolsCn)
+        }
     } else {
         if (enableMemoryQuery) {
             // Only memory tools are available, package system is disabled
@@ -560,10 +436,11 @@ AVAILABLE_TOOLS_SECTION""".trimIndent()
           customSystemPromptTemplate: String = "",
           enableTools: Boolean = true,
           enableMemoryQuery: Boolean = true,
-          hasImageRecognition: Boolean = false
+          hasImageRecognition: Boolean = false,
+          useToolCallApi: Boolean = false
   ): String {
     // Get the base system prompt
-    val basePrompt = getSystemPrompt(packageManager, workspacePath, false, thinkingGuidance, customSystemPromptTemplate, enableTools, enableMemoryQuery, hasImageRecognition)
+    val basePrompt = getSystemPrompt(packageManager, workspacePath, false, thinkingGuidance, customSystemPromptTemplate, enableTools, enableMemoryQuery, hasImageRecognition, useToolCallApi)
 
     // Apply custom prompts
     return applyCustomPrompts(basePrompt, customIntroPrompt)

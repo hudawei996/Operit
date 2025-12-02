@@ -390,6 +390,14 @@ class ModelConfigManager(private val context: Context) {
         return updatedConfig
     }
 
+    // 更新 Tool Call 配置
+    suspend fun updateToolCall(configId: String, enableToolCall: Boolean): ModelConfigData {
+        val config = getModelConfigFlow(configId).first()
+        val updatedConfig = config.copy(enableToolCall = enableToolCall)
+        saveConfigToDataStore(updatedConfig)
+        return updatedConfig
+    }
+
     suspend fun updateContextSettings(
             configId: String,
             contextLength: Float,

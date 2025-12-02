@@ -4,6 +4,7 @@ import android.util.Log
 import com.ai.assistance.operit.data.model.ApiProviderType
 import com.ai.assistance.operit.data.model.ModelOption
 import com.ai.assistance.operit.data.model.ModelParameter
+import com.ai.assistance.operit.data.model.ToolPrompt
 import com.ai.assistance.operit.data.model.ParameterCategory
 import com.ai.assistance.operit.util.ChatUtils
 import com.ai.assistance.operit.util.TokenCacheManager
@@ -273,6 +274,7 @@ class GeminiProvider(
             modelParameters: List<ModelParameter<*>>,
             enableThinking: Boolean,
             stream: Boolean,
+            availableTools: List<ToolPrompt>?,
             onTokensUpdated: suspend (input: Int, cachedInput: Int, output: Int) -> Unit,
             onNonFatalError: suspend (error: String) -> Unit
     ): Stream<String> = stream {

@@ -2535,6 +2535,8 @@
     <string name="enable_direct_image_processing_desc">启用后，图片将直接发送给AI处理，而不是让AI通过OCR工具读取</string>
     <string name="enable_google_search">启用 Google Search</string>
     <string name="enable_google_search_desc">启用后，Gemini 将使用 Google 搜索来增强回答（可能产生额外费用）</string>
+    <string name="enable_tool_call">启用 Tool Call 接口调用工具</string>
+    <string name="enable_tool_call_desc">启用后，将使用模型原生的Tool Call接口调用工具，而不是XML格式（需要模型支持）</string>
     <string name="search_sources">搜索来源</string>
     <string name="api_settings_saved">API设置已保存</string>
     <string name="save_api_settings">保存API设置</string>
