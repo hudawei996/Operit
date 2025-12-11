@@ -191,6 +191,10 @@ class FileBindingService(context: Context) {
                     AppLogger.w(TAG, "Could not find a suitable match for OLD block: ${op.oldContent.take(100)}...")
                     return Pair(false, "Could not find a match for an OLD block. The file may have changed too much.")
                 }
+                if (hasMultiplePerfectMatches(originalContent, op.oldContent)) {
+                    AppLogger.w(TAG, "Multiple perfect matches found for OLD block; aborting to avoid ambiguous replacement.")
+                    return Pair(false, "Found multiple perfect matches for an OLD block in the target file. Please refine the patch so it only matches a single location.")
+                }
                 enrichedOps.add(Triple(op, start, end))
             }
 
@@ -447,6 +451,23 @@ class FileBindingService(context: Context) {
         
         val lcsLength = dp[len1][len2]
         return (2.0 * lcsLength) / (len1 + len2)
+    }
+
+    private fun hasMultiplePerfectMatches(originalContent: String, oldContent: String): Boolean {
+        val normalizedOld = oldContent.replace(Regex("\\s+"), "")
+        if (normalizedOld.isEmpty()) return false
+
+        val normalizedOriginal = originalContent.replace(Regex("\\s+"), "")
+        var count = 0
+        var index = normalizedOriginal.indexOf(normalizedOld)
+        while (index >= 0) {
+            count++
+            if (count > 1) {
+                return true
+            }
+            index = normalizedOriginal.indexOf(normalizedOld, index + normalizedOld.length)
+        }
+        return false
     }
 
     private fun String.trimTrailingNewline(): String = this.trimEnd('\n', '\r')
